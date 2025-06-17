@@ -80,6 +80,10 @@ private:
     casadi::MX ellipseConstraint(const casadi::MX& pos, const Eigen::VectorXd& ob);
     casadi::MX quadratic(const casadi::MX& x, const Eigen::MatrixXd& A);
     
+    // 角度归一化函数
+    double normalizeAngle(double angle);
+    double angleDifference(double angle1, double angle2);
+    
     // 对应Python中的f函数 - 系统模型
     casadi::MX systemModel(const casadi::MX& x, const casadi::MX& u);
 };

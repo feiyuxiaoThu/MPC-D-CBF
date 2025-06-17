@@ -3,6 +3,7 @@
 #include <visualization_msgs/MarkerArray.h>
 
 #include <chrono>
+#include <unordered_map>
 
 #include "kalman.h"
 
@@ -11,8 +12,6 @@ using namespace Eigen;
 
 ros::Subscriber _obs_sub;
 ros::Publisher _obs_pub, _obs_vis_pub;
-
-const size_t obs_kf_buffer_size = 100;
 
 struct Ellipse
 {
@@ -54,14 +53,15 @@ public:
 
   void obs_predict();
   obs_kf();
-} _obs_kf[obs_kf_buffer_size];
+};
+
+// 使用动态容器替代固定大小数组
+std::unordered_map<int, obs_kf> _obs_kf_map;
 
 obs_kf::obs_kf() : N(25)
 {
-  ka.m_StateSize = 9;
-  ka.m_MeaSize = 5;
-  ka.m_USize = 9;
-
+  ka = Kalman(9, 5, 9);  // StateSize=9, MeaSize=5, USize=9
+  
   T = 0.1;
 
   x.resize(9);
@@ -125,6 +125,13 @@ void obs_kf::obs_predict()
   if (num == 0)
     return;
 
+  // 添加安全检查：确保ka.m_x已正确初始化
+  if (ka.m_x.size() != 9)
+  {
+    ROS_ERROR("ka.m_x not properly initialized! Size: %ld, expected: 9", ka.m_x.size());
+    return;
+  }
+
   if (num == 1)
   {
     ka.m_x << param_list[0].x, param_list[0].y, param_list[0].a, param_list[0].b, param_list[0].theta, 0, 0, 0, 0;
@@ -132,6 +139,13 @@ void obs_kf::obs_predict()
   }
   else
   {
+    // 添加安全检查：确保param_list不为空
+    if (param_list.empty())
+    {
+      ROS_ERROR("param_list is empty in obs_predict!");
+      return;
+    }
+    
     float _mea_cov_min = 0.005;
     float _mea_cov_max = 0.05;
     float _k_cov_min = 1;
@@ -260,7 +274,22 @@ void obscb(const std_msgs::Float32MultiArray::ConstPtr& msg)
   vector<Ellipse> ellipses_array;
   for (int i = 0; i < num; i++)
   {
+    // 添加安全检查：确保数据足够
+    if ((7 * i + 6) >= msg->data.size())
+    {
+      ROS_ERROR("Data index out of bounds: %d >= %zu", 7 * i + 6, msg->data.size());
+      break;
+    }
+    
     int flag = msg->data[7 * i + 5];
+    
+    // 添加安全检查：flag应该为非负数
+    if (flag < 0)
+    {
+      ROS_ERROR("Invalid flag value: %d, flag must be non-negative", flag);
+      continue;
+    }
+    
     ROS_INFO("[DEBUG] Obstacle %d: flag=%d, position=(%.2f, %.2f), size=(%.2f, %.2f)", 
              i, flag, msg->data[7 * i], msg->data[7 * i + 1], msg->data[7 * i + 2], msg->data[7 * i + 3]);
 
@@ -272,9 +301,9 @@ void obscb(const std_msgs::Float32MultiArray::ConstPtr& msg)
     _obs_tmp.theta = msg->data[7 * i + 4];
     _obs_tmp.mea_cov = msg->data[7 * i + 6];
 
-    _obs_kf[flag].param_list.push_back(_obs_tmp);
+    _obs_kf_map[flag].param_list.push_back(_obs_tmp);
 
-    curve_fitting(_obs_kf[flag], obs_pub, ellipses_array);
+    curve_fitting(_obs_kf_map[flag], obs_pub, ellipses_array);
   }
 
   ROS_INFO("[DEBUG] Publishing %zu predicted obstacles", ellipses_array.size());

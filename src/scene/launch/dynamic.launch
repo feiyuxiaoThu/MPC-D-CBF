@@ -3,6 +3,7 @@
 <launch>
     <include file="$(find scene)/launch/start.launch">
         <arg name="world" value="$(find scene)/worlds/world.world" />
+        <arg name="gui" value="true" />
     </include>
 
     <include file="$(find jackal_description)/launch/description.launch" />
@@ -18,7 +19,7 @@
     <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
         args="-urdf -model jackal -param robot_description -x -10 -y 0 -z 1.0" />
 
-    <!-- <include file="$(find local_map)/launch/for_simulation.launch" /> -->
+    <include file="$(find local_map)/launch/for_simulation.launch" />
 
     <include file="$(find scene)/launch/movetest_node.launch" />
 

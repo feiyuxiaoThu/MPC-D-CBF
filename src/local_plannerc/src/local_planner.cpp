@@ -9,6 +9,19 @@ double LocalPlanner::distanceGlobal(const Eigen::Vector2d& c1, const Eigen::Vect
     return std::sqrt((c1(0) - c2(0)) * (c1(0) - c2(0)) + (c1(1) - c2(1)) * (c1(1) - c2(1)));
 }
 
+// 角度归一化到[-π, π]范围
+double LocalPlanner::normalizeAngle(double angle) {
+    while (angle > M_PI) angle -= 2.0 * M_PI;
+    while (angle < -M_PI) angle += 2.0 * M_PI;
+    return angle;
+}
+
+// 计算两个角度之间的最小差值
+double LocalPlanner::angleDifference(double angle1, double angle2) {
+    double diff = angle1 - angle2;
+    return normalizeAngle(diff);
+}
+
 // 对应Python: __init__函数 (lines 17-44)
 LocalPlanner::LocalPlanner() : nh_("~") {
     // 对应Python: self.replan_period = rospy.get_param('/local_planner/replan_period', 0.05)
@@ -66,20 +79,50 @@ void LocalPlanner::replanCallback(const ros::TimerEvent& event) {
     
     ROS_INFO("chooseGoalState success, about to call mpcEllip()");
     
-    // 对应Python: 角度信息添加 (lines 48-57)
+    // 对应Python: 角度信息添加 (lines 48-57) - 修复角度跳变问题
     for (int i = 0; i < N_ - 1; ++i) {
         double y_diff = goal_state_(i+1, 1) - goal_state_(i, 1);
         double x_diff = goal_state_(i+1, 0) - goal_state_(i, 0);
         
         if (std::abs(x_diff) > 1e-6 && std::abs(y_diff) > 1e-6) {
-            goal_state_(i, 2) = std::atan2(y_diff, x_diff);
+            double raw_angle = std::atan2(y_diff, x_diff);
+            
+            // 第一个点：如果与当前状态角度差太大，调整到最近的等效角度
+            if (i == 0) {
+                double current_angle = curr_state_(2);
+                double angle_diff = angleDifference(raw_angle, current_angle);
+                // 如果角度差超过π/2，选择最接近当前角度的等效角度
+                if (std::abs(angle_diff) > M_PI/2) {
+                    // 尝试加减2π找到最接近的角度
+                    double alt_angle1 = raw_angle + 2.0 * M_PI;
+                    double alt_angle2 = raw_angle - 2.0 * M_PI;
+                    
+                    double diff1 = std::abs(angleDifference(alt_angle1, current_angle));
+                    double diff2 = std::abs(angleDifference(alt_angle2, current_angle));
+                    double diff_orig = std::abs(angle_diff);
+                    
+                    if (diff1 < diff_orig && diff1 < diff2) {
+                        raw_angle = alt_angle1;
+                    } else if (diff2 < diff_orig && diff2 < diff1) {
+                        raw_angle = alt_angle2;
+                    }
+                }
+            }
+            
+            goal_state_(i, 2) = raw_angle;
         } else if (i != 0) {
             goal_state_(i, 2) = goal_state_(i-1, 2);
         } else {
-            goal_state_(i, 2) = 0.0;
+            // 如果第一个点没有明显方向，使用当前状态角度
+            goal_state_(i, 2) = curr_state_(2);
         }
     }
     goal_state_(N_-1, 2) = goal_state_(N_-2, 2);
+    
+    // 归一化所有角度
+    for (int i = 0; i < N_; ++i) {
+        goal_state_(i, 2) = normalizeAngle(goal_state_(i, 2));
+    }
     
     // 对应Python: states_sol, input_sol = self.MPC_ellip()
     auto [states_sol, input_sol] = mpcEllip();
@@ -111,7 +154,7 @@ void LocalPlanner::currPoseCallback(const std_msgs::Float32MultiArray::ConstPtr&
     if (msg->data.size() >= 3) {
         curr_state_(0) = msg->data[0];
         curr_state_(1) = msg->data[1];
-        curr_state_(2) = msg->data[2];
+        curr_state_(2) = normalizeAngle(msg->data[2]); // 归一化角度
         curr_state_received_ = true;
     }
 }
@@ -489,16 +532,35 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
             Eigen::Vector3d q_diag(1.0 + 0.05*i, 1.0 + 0.05*i, 0.02 + 0.005*i);
             Eigen::Matrix3d Q = q_diag.asDiagonal();
             
-            // 状态误差
-            casadi::MX goal_vec = casadi::MX(casadi::DM({goal_state_(i, 0), goal_state_(i, 1), goal_state_(i, 2)}));
-            casadi::MX state_error = opt_states(i, casadi::Slice()) - goal_vec.T();
+            // 状态误差 - 分别处理位置和角度
+            // 位置误差 (x, y)
+            casadi::MX pos_error = casadi::MX::vertcat({
+                opt_states(i, 0) - goal_state_(i, 0),
+                opt_states(i, 1) - goal_state_(i, 1)
+            });
+            
+            // 角度误差 - 使用sin和cos来处理角度差以避免跳变
+            casadi::MX angle_current = opt_states(i, 2);
+            casadi::MX angle_goal = casadi::MX(goal_state_(i, 2));
+            
+            // 使用角度差的sin和cos来创建连续的角度误差
+            casadi::MX angle_error_sin = casadi::MX::sin(angle_current - angle_goal);
+            casadi::MX angle_error_cos = casadi::MX::cos(angle_current - angle_goal) - 1;
+            
+            // 位置部分的二次项
+            casadi::MX pos_cost = pos_error(0) * pos_error(0) * Q(0,0) + 
+                                  pos_error(1) * pos_error(1) * Q(1,1);
+            
+            // 角度部分的二次项 - 使用1-cos(θ)形式，它在θ=0附近是连续且平滑的
+            casadi::MX angle_cost = Q(2,2) * (angle_error_sin * angle_error_sin + 
+                                              angle_error_cos * angle_error_cos);
             
             if (i < N_ - 1) {
                 // 控制误差  
                 casadi::MX control_error = opt_controls(i, casadi::Slice());
-                obj += 0.1 * quadratic(state_error, Q) + quadratic(control_error, R);
+                obj += 0.1 * (pos_cost + angle_cost) + quadratic(control_error, R);
             } else {
-                obj += 0.1 * quadratic(state_error, Q);
+                obj += 0.1 * (pos_cost + angle_cost);
             }
             
             if (i < 3) { // Only print first few
@@ -507,11 +569,31 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
             }
         }
         
-        // 终端约束权重
+        // 终端约束权重 - 修复角度误差计算
         Eigen::Matrix3d Q_terminal = Eigen::Vector3d(5.0, 5.0, 0.1).asDiagonal();
-        casadi::MX goal_terminal = casadi::MX(casadi::DM({goal_state_(N_-1, 0), goal_state_(N_-1, 1), goal_state_(N_-1, 2)}));
-        casadi::MX terminal_error = opt_states(N_-1, casadi::Slice()) - goal_terminal.T();
-        obj += quadratic(terminal_error, Q_terminal);
+        
+        // 终端位置误差
+        casadi::MX terminal_pos_error = casadi::MX::vertcat({
+            opt_states(N_-1, 0) - goal_state_(N_-1, 0),
+            opt_states(N_-1, 1) - goal_state_(N_-1, 1)
+        });
+        
+        // 终端角度误差
+        casadi::MX terminal_angle_current = opt_states(N_-1, 2);
+        casadi::MX terminal_angle_goal = casadi::MX(goal_state_(N_-1, 2));
+        
+        casadi::MX terminal_angle_error_sin = casadi::MX::sin(terminal_angle_current - terminal_angle_goal);
+        casadi::MX terminal_angle_error_cos = casadi::MX::cos(terminal_angle_current - terminal_angle_goal) - 1;
+        
+        // 终端位置成本
+        casadi::MX terminal_pos_cost = terminal_pos_error(0) * terminal_pos_error(0) * Q_terminal(0,0) + 
+                                       terminal_pos_error(1) * terminal_pos_error(1) * Q_terminal(1,1);
+        
+        // 终端角度成本
+        casadi::MX terminal_angle_cost = Q_terminal(2,2) * (terminal_angle_error_sin * terminal_angle_error_sin + 
+                                                             terminal_angle_error_cos * terminal_angle_error_cos);
+        
+        obj += terminal_pos_cost + terminal_angle_cost;
         ROS_INFO("Added terminal cost term, terminal goal: [%.3f, %.3f, %.3f]", 
                  goal_state_(N_-1, 0), goal_state_(N_-1, 1), goal_state_(N_-1, 2));
         
