@@ -1,6 +1,0 @@
- <launch>
-    <!-- 启动点击目标路径发布节点 -->
-    <node pkg="global_path_publisher" type="clicked_goal_path_publisher" output="screen" name="clicked_goal_path_publisher">
-        <param name="step" value="0.1"/> <!-- 路径点之间的距离 -->
-    </node>
-</launch>
