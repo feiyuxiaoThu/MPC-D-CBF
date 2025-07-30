@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/local_planner_mpc.dir/src/main.cpp.o -o local_planner_mpc  -Wl,-rpath,/usr/local/lib liblocal_plannerc.a /usr/local/lib/libcasadi.so 

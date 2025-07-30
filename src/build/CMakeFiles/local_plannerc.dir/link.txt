@@ -1,2 +1,0 @@
-/usr/bin/ar qc liblocal_plannerc.a CMakeFiles/local_plannerc.dir/src/local_planner.cpp.o
-/usr/bin/ranlib liblocal_plannerc.a

@@ -1,4 +1,0 @@
-/home/echo/Ros/mpc_dcbf/local_plannerc/build/CMakeFiles/local_plannerc.dir
-/home/echo/Ros/mpc_dcbf/local_plannerc/build/CMakeFiles/local_planner_mpc.dir
-/home/echo/Ros/mpc_dcbf/local_plannerc/build/CMakeFiles/edit_cache.dir
-/home/echo/Ros/mpc_dcbf/local_plannerc/build/CMakeFiles/rebuild_cache.dir
