@@ -21,6 +21,10 @@ endif()
 # 对应Python numpy依赖 - 线性代数库  
 find_package(Eigen3 REQUIRED)
 
+# 查找Python依赖以使用matplotlib-cpp
+find_package(PythonLibs 3 REQUIRED)
+include_directories(${PYTHON_INCLUDE_DIRS})
+
 
 # 包含目录
 include_directories(
@@ -52,5 +56,6 @@ add_executable(local_planner_mpc
 target_link_libraries(local_planner_mpc
   ${PROJECT_NAME}
   ${CASADI_LIBRARIES}
+  ${PYTHON_LIBRARIES}
 )
 

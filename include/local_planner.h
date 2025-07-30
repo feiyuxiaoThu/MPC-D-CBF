@@ -37,10 +37,17 @@ private:
     
 
 public:
+    // Make data public for visualization from main
+    Eigen::MatrixXd last_state_;
+    Eigen::MatrixXd goal_state_;
+    std::vector<Eigen::VectorXd> obstacles_;
+    bool mpc_success_;
+
     LocalPlanner();
     ~LocalPlanner();
 
     void replanCallback();
+    void visualizeResults();
     
 private:
     // 对应Python的回调函数
