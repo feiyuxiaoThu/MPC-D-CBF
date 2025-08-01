@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <fstream>
+#include <iomanip>
 
 namespace plt = matplotlibcpp;
 
@@ -144,6 +146,53 @@ void LocalPlanner::visualizeResults() {
 
     // 7. 显示图像
     plt::show();
+}
+
+void LocalPlanner::saveDataForVisualization() const {
+    // 1. 保存 last_state_ (MPC 预测轨迹)
+    std::ofstream mpc_file("mpc_trajectory.txt");
+    if (mpc_file.is_open()) {
+        for (int i = 0; i < last_state_.rows(); ++i) {
+            mpc_file << std::fixed << std::setprecision(5) << last_state_(i, 0) << " " << last_state_(i, 1) << std::endl;
+        }
+        mpc_file.close();
+    }
+
+    // 2. 保存 goal_state_ (参考轨迹)
+    std::ofstream goal_file("reference_trajectory.txt");
+    if (goal_file.is_open()) {
+        for (int i = 0; i < goal_state_.rows(); ++i) {
+            goal_file << std::fixed << std::setprecision(5) << goal_state_(i, 0) << " " << goal_state_(i, 1) << std::endl;
+        }
+        goal_file.close();
+    }
+
+    // 3. 保存 global_path_ (全局路径)
+    std::ofstream global_path_file("global_path.txt");
+    if (global_path_file.is_open()) {
+        for (int i = 0; i < global_path_.rows(); ++i) {
+            global_path_file << std::fixed << std::setprecision(5) << global_path_(i, 0) << " " << global_path_(i, 1) << std::endl;
+        }
+        global_path_file.close();
+    }
+
+    // 4. 保存 obstacles_ (障碍物)
+    std::ofstream obs_file("obstacles.txt");
+    if (obs_file.is_open()) {
+        // 由于障碍物在N个时间步长内是重复的，我们只为每个障碍物序列保存一次
+        if (!obstacles_.empty()) {
+            int num_obs_sequences = obstacles_.size() / N_;
+            for (int j = 0; j < num_obs_sequences; ++j) {
+                const auto& ob = obstacles_[j * N_];
+                for (int k = 0; k < ob.size(); ++k) {
+                    obs_file << std::fixed << std::setprecision(5) << ob(k) << (k == ob.size() - 1 ? "" : " ");
+                }
+                obs_file << std::endl;
+            }
+        }
+        obs_file.close();
+    }
+    std::cout << "Visualization data saved to files." << std::endl;
 }
 
 
@@ -379,10 +428,10 @@ int main() {
     planner.replanCallback();
     
     if (planner.mpc_success_) {
-        std::cout << "Displaying visualization..." << std::endl;
-        planner.visualizeResults();
+        std::cout << "Saving visualization data..." << std::endl;
+        planner.saveDataForVisualization();
     } else {
-        std::cout << "MPC failed, no visualization to display." << std::endl;
+        std::cout << "MPC failed, no visualization data to save." << std::endl;
     }
     
     return 0;

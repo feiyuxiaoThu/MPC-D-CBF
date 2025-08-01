@@ -48,7 +48,8 @@ public:
 
     void replanCallback();
     void visualizeResults();
-    
+    void saveDataForVisualization() const;
+
 private:
     // 对应Python的回调函数
     void currPoseCallback();

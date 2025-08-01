@@ -66,10 +66,19 @@ echo "=========================================="
 sudo apt install -y libeigen3-dev
 
 echo "=========================================="
+echo "安装Python依赖 (用于可视化)"
+echo "=========================================="
+sudo apt install -y \
+    python3-pip \
+    python3-numpy \
+    python3-matplotlib
+
+echo "=========================================="
 echo "安装CasADi优化库 (对应Python casadi)"
 echo "=========================================="
 
 # 检查是否已安装CasADi
+
 if pkg-config --exists casadi; then
     echo "CasADi已安装，版本: $(pkg-config --modversion casadi)"
 else
