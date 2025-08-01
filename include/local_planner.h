@@ -24,7 +24,6 @@ private:
     // 对应Python: self.last_input, self.last_state, self.mpc_success
     Eigen::MatrixXd last_input_;
     Eigen::MatrixXd last_state_;
-    bool mpc_success_;
     
     // 对应Python的threading.Lock()
     std::mutex curr_pose_mutex_;
@@ -37,19 +36,17 @@ private:
     
 
 public:
-    // Make data public for visualization from main
-    Eigen::MatrixXd last_state_;
-    Eigen::MatrixXd goal_state_;
-    std::vector<Eigen::VectorXd> obstacles_;
+    
     bool mpc_success_;
 
     LocalPlanner();
     ~LocalPlanner();
 
     void replanCallback();
-    void visualizeResults();
-    void saveDataForVisualization() const;
 
+    void saveDataForVisualization2D() const;
+    void saveDataForVisualization3D() const;
+    
 private:
     // 对应Python的回调函数
     void currPoseCallback();
