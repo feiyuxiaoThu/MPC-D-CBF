@@ -39,7 +39,7 @@ add_compile_options(-O3 -Wall -Wextra)
 
 # 创建库文件
 add_library(${PROJECT_NAME}
-  src/local_planner.cpp
+  src/local_planner_linear.cpp
 )
 
 # 链接库依赖
@@ -58,4 +58,3 @@ target_link_libraries(local_planner_mpc
   ${CASADI_LIBRARIES}
   ${PYTHON_LIBRARIES}
 )
-

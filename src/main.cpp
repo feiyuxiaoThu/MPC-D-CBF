@@ -6,13 +6,9 @@ int main() {
     LocalPlanner planner;
     planner.replanCallback();
     
-    if (planner.mpc_success_) {
-        std::cout << "Saving visualization data..." << std::endl;
-        planner.saveDataForVisualization2D();
-        planner.saveDataForVisualization3D();
-    } else {
-        std::cout << "MPC failed, no visualization data to save." << std::endl;
-    }
+    std::cout << "Saving visualization data..." << std::endl;
+    planner.saveDataForVisualization2D();
+    planner.saveDataForVisualization3D();
     
     return 0;
 }
