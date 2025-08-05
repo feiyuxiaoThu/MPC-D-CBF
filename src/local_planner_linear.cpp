@@ -7,9 +7,9 @@
 
 
 
-void LocalPlanner::saveDataForVisualization3D() const {
+void LocalPlanner::saveDataForVisualization() const {
     // 1. 保存 last_state_ (MPC 预测轨迹)
-    std::ofstream mpc_file("../plot/3D/mpc_trajectory.txt");
+    std::ofstream mpc_file("../plot/mpc_trajectory.txt");
     if (mpc_file.is_open()) {
         for (int i = 0; i < last_state_.rows(); ++i) {
             mpc_file << std::fixed << std::setprecision(5) << last_state_(i, 0) << " " << last_state_(i, 1) << std::endl;
@@ -18,7 +18,7 @@ void LocalPlanner::saveDataForVisualization3D() const {
     }
 
     // 2. 保存 goal_state_ (参考轨迹)
-    std::ofstream goal_file("../plot/3D/reference_trajectory.txt");
+    std::ofstream goal_file("../plot/reference_trajectory.txt");
     if (goal_file.is_open()) {
         for (int i = 0; i < goal_state_.rows(); ++i) {
             goal_file << std::fixed << std::setprecision(5) << goal_state_(i, 0) << " " << goal_state_(i, 1) << std::endl;
@@ -27,7 +27,7 @@ void LocalPlanner::saveDataForVisualization3D() const {
     }
 
     // 3. 保存 global_path_ (全局路径)
-    std::ofstream global_path_file("../plot/3D/global_path.txt");
+    std::ofstream global_path_file("../plot/global_path.txt");
     if (global_path_file.is_open()) {
         for (int i = 0; i < global_path_.rows(); ++i) {
             global_path_file << std::fixed << std::setprecision(5) << global_path_(i, 0) << " " << global_path_(i, 1) << std::endl;
@@ -36,7 +36,7 @@ void LocalPlanner::saveDataForVisualization3D() const {
     }
 
     // 4. 保存 obstacles_ (所有时间步的障碍物)
-    std::ofstream obs_file("../plot/3D/obstacles.txt");
+    std::ofstream obs_file("../plot/obstacles.txt");
     if (obs_file.is_open()) {
         if (!obstacles_.empty()) {
             for (const auto& ob : obstacles_) {
@@ -50,61 +50,7 @@ void LocalPlanner::saveDataForVisualization3D() const {
     }
 
     // 5. 保存配置参数
-    std::ofstream config_file("../plot/3D/config.txt");
-    if (config_file.is_open()) {
-        config_file << "N " << N_ << std::endl;
-        config_file << "replan_period " << replan_period_ << std::endl;
-        config_file.close();
-    }
-
-    std::cout << "Visualization data 3D saved to files." << std::endl;
-}
-
-
-void LocalPlanner::saveDataForVisualization2D() const {
-    // 1. 保存 last_state_ (MPC 预测轨迹)
-    std::ofstream mpc_file("../plot/2D/mpc_trajectory.txt");
-    if (mpc_file.is_open()) {
-        for (int i = 0; i < last_state_.rows(); ++i) {
-            mpc_file << std::fixed << std::setprecision(5) << last_state_(i, 0) << " " << last_state_(i, 1) << std::endl;
-        }
-        mpc_file.close();
-    }
-
-    // 2. 保存 goal_state_ (参考轨迹)
-    std::ofstream goal_file("../plot/2D/reference_trajectory.txt");
-    if (goal_file.is_open()) {
-        for (int i = 0; i < goal_state_.rows(); ++i) {
-            goal_file << std::fixed << std::setprecision(5) << goal_state_(i, 0) << " " << goal_state_(i, 1) << std::endl;
-        }
-        goal_file.close();
-    }
-
-    // 3. 保存 global_path_ (全局路径)
-    std::ofstream global_path_file("../plot/2D/global_path.txt");
-    if (global_path_file.is_open()) {
-        for (int i = 0; i < global_path_.rows(); ++i) {
-            global_path_file << std::fixed << std::setprecision(5) << global_path_(i, 0) << " " << global_path_(i, 1) << std::endl;
-        }
-        global_path_file.close();
-    }
-
-    // 4. 保存 obstacles_ (所有时间步的障碍物)
-    std::ofstream obs_file("../plot/2D/obstacles.txt");
-    if (obs_file.is_open()) {
-        if (!obstacles_.empty()) {
-            for (const auto& ob : obstacles_) {
-                for (int k = 0; k < ob.size(); ++k) {
-                    obs_file << std::fixed << std::setprecision(5) << ob(k) << (k == ob.size() - 1 ? "" : " ");
-                }
-                obs_file << std::endl;
-            }
-        }
-        obs_file.close();
-    }
-
-    // 5. 保存配置参数
-    std::ofstream config_file("../plot/2D/config.txt");
+    std::ofstream config_file("../plot/config.txt");
     if (config_file.is_open()) {
         config_file << "N " << N_ << std::endl;
         config_file.close();
@@ -527,9 +473,13 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
                 double angle_diff = normalizeAngle(goal_state_(i+1, 2) - goal_state_(i, 2));
                 u_ref(1) = angle_diff / T; // omega_ref
             } else {
-                u_ref = (i > 0) ? last_input_.row(i-1) : Eigen::Vector2d::Zero();
+                // Use if-else to avoid ternary operator type deduction issue with Eigen expressions
+                if (i > 0) {
+                    u_ref = last_input_.row(i-1);
+                } else {
+                    u_ref = Eigen::Vector2d::Zero();
+                }
             }
-
             // 2. Calculate Jacobian matrices at the reference point
             double v_ref = u_ref(0);
             double theta_ref = x_ref(2);
