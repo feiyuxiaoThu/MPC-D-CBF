@@ -39,7 +39,7 @@ add_compile_options(-O3 -Wall -Wextra)
 
 # 创建库文件
 add_library(${PROJECT_NAME}
-  src/local_planner_linear.cpp
+  src/local_planner.cpp
 )
 
 # 链接库依赖

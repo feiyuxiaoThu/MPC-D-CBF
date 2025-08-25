@@ -7,58 +7,7 @@
 
 
 
-void LocalPlanner::saveDataForVisualization3D() const {
-    // 1. 保存 last_state_ (MPC 预测轨迹)
-    std::ofstream mpc_file("../plot/3D/mpc_trajectory.txt");
-    if (mpc_file.is_open()) {
-        for (int i = 0; i < last_state_.rows(); ++i) {
-            mpc_file << std::fixed << std::setprecision(5) << last_state_(i, 0) << " " << last_state_(i, 1) << std::endl;
-        }
-        mpc_file.close();
-    }
 
-    // 2. 保存 goal_state_ (参考轨迹)
-    std::ofstream goal_file("../plot/3D/reference_trajectory.txt");
-    if (goal_file.is_open()) {
-        for (int i = 0; i < goal_state_.rows(); ++i) {
-            goal_file << std::fixed << std::setprecision(5) << goal_state_(i, 0) << " " << goal_state_(i, 1) << std::endl;
-        }
-        goal_file.close();
-    }
-
-    // 3. 保存 global_path_ (全局路径)
-    std::ofstream global_path_file("../plot/3D/global_path.txt");
-    if (global_path_file.is_open()) {
-        for (int i = 0; i < global_path_.rows(); ++i) {
-            global_path_file << std::fixed << std::setprecision(5) << global_path_(i, 0) << " " << global_path_(i, 1) << std::endl;
-        }
-        global_path_file.close();
-    }
-
-    // 4. 保存 obstacles_ (所有时间步的障碍物)
-    std::ofstream obs_file("../plot/3D/obstacles.txt");
-    if (obs_file.is_open()) {
-        if (!obstacles_.empty()) {
-            for (const auto& ob : obstacles_) {
-                for (int k = 0; k < ob.size(); ++k) {
-                    obs_file << std::fixed << std::setprecision(5) << ob(k) << (k == ob.size() - 1 ? "" : " ");
-                }
-                obs_file << std::endl;
-            }
-        }
-        obs_file.close();
-    }
-
-    // 5. 保存配置参数
-    std::ofstream config_file("../plot/3D/config.txt");
-    if (config_file.is_open()) {
-        config_file << "N " << N_ << std::endl;
-        config_file << "replan_period " << replan_period_ << std::endl;
-        config_file.close();
-    }
-
-    std::cout << "Visualization data 3D saved to files." << std::endl;
-}
 
 
 void LocalPlanner::saveDataForVisualization2D() const {
@@ -137,18 +86,25 @@ LocalPlanner::LocalPlanner() {
     //nh_.param("/local_planner/replan_period", replan_period_, 0.05);
     
     // 对应Python: self.N = 25, self.z = 0
-    N_ = 50; // MPC预测步数
+    N_ = 80; // MPC预测步数
     z_ = 0.0;
     replan_period_ = 0.1;
+    L_ = 2.5; // 车辆轴距 (m)
     
     // 对应Python: self.goal_state = np.zeros([self.N, 3])
-    goal_state_ = Eigen::MatrixXd::Zero(N_, 3);
+    goal_state_ = Eigen::MatrixXd::Zero(N_, 4);
     
     // 对应Python: self.curr_state = None等初始化
-    curr_state_ = Eigen::Vector3d::Zero();
+    curr_state_ = Eigen::Vector4d::Zero();
     mpc_success_ = false;
     curr_state_received_ = true;
     global_path_received_ = true;
+    use_vo_cbf_ = true; // 激活 CBF/VO 约束
+    use_vo_constraint_ = false; // 默认激活VO约束
+    w_vo_slack_ = 1.0;      // VO松弛变量的默认权重
+    w_track_ = 5000.0;           // 轨迹跟踪误差的默认权重
+    w_a_rate_ = 2.0;          // 加速度变化率(jerk)的默认权重
+    w_delta_rate_ = 3.0;      // 转角变化率的默认权重
 
     currPoseCallback(); // curr_state_
     obsCallback();
@@ -165,7 +121,7 @@ LocalPlanner::LocalPlanner() {
     */
     // 对应Python: self.last_input = [], self.last_state = []
     last_input_ = Eigen::MatrixXd::Zero(N_, 2);
-    last_state_ = Eigen::MatrixXd::Zero(N_ + 1, 3);
+    last_state_ = Eigen::MatrixXd::Zero(N_ + 1, 4);
     
     //ROS_INFO("Local Planner initialized with N=%d, replan_period=%.3f", N_, replan_period_);
 }
@@ -242,17 +198,17 @@ void LocalPlanner::replanCallback() {
     
     
     // 对应Python: cmd_move发布 (lines 61-63)
-    bool cmd_move;
-    {
-        std::lock_guard<std::mutex> lock(global_path_mutex_);
-        if (global_path_received_ && global_path_.rows() > 0) {
-            Eigen::Vector2d curr_pos = curr_state_.head<2>();
-            Eigen::Vector2d goal_pos = global_path_.bottomRows(1).leftCols(2).transpose();
-            cmd_move = distanceGlobal(curr_pos, goal_pos) > 0.1;
-        } else {
-            cmd_move = false;
-        }
-    }
+    // bool cmd_move;
+    // {
+    //     std::lock_guard<std::mutex> lock(global_path_mutex_);
+    //     if (global_path_received_ && global_path_.rows() > 0) {
+    //         Eigen::Vector2d curr_pos = curr_state_.head<2>();
+    //         Eigen::Vector2d goal_pos = global_path_.bottomRows(1).leftCols(2).transpose();
+    //         cmd_move = distanceGlobal(curr_pos, goal_pos) > 0.1;
+    //     } else {
+    //         cmd_move = false;
+    //     }
+    // }
    
     //ROS_INFO("start local_plan_pub_ published");
     //publishLocalPlan(input_sol, states_sol);
@@ -263,9 +219,8 @@ void LocalPlanner::currPoseCallback() {
     std::lock_guard<std::mutex> lock(curr_pose_mutex_);
     bool use_ego_cor = true;
     if (use_ego_cor) {
-        curr_state_(0) = 0.0;
-        curr_state_(1) = 0.0;
-        curr_state_(2) = 0.0; // 归一化角度
+        // 起始状态: 位于(0,0), 速度为3m/s, 方向朝上(π/2)
+        curr_state_ << 0.0, 0.0, M_PI / 2.0, 8.0;
         curr_state_received_ = true;
     }
 }
@@ -274,47 +229,80 @@ void LocalPlanner::currPoseCallback() {
 void LocalPlanner::obsCallback() {
     std::lock_guard<std::mutex> lock(obstacle_mutex_);
     obstacles_.clear();
+
+    // --- 障碍物 1: 位于初始路径上的静态障碍物 ---
+    Eigen::VectorXd static_ob(5);
+    static_ob << -12.0, 20.0, 1.0, 1.0, 0.0; // 位置(0, 8), 半径 1.0m
+    for(int i = 0; i < N_; i++){
+        obstacles_.push_back(static_ob);
+    }
+
+    // --- 障碍物 2: 从左向右穿行的动态障碍物 ---
+    Eigen::VectorXd dynamic_ob_initial(5);
+    dynamic_ob_initial << -20.0, 12.0, 1.5, 0.8, 0.0; // 初始位置(-10, 12), 尺寸(1.5, 0.8), 方向朝右
     
-    int size_static = 1; // 1 static obs
-    int size_dynamic = 1; // 1 dynamic obs
-    int size = N_*(size_static + size_dynamic);
+    double obs_vx = 2.0; // X方向速度
 
-    Eigen::VectorXd ob(5);
-    ob << 3.0,1.0,0.5,0.8,0.0;
-    for(int i =0; i< size_static*N_; i++){
-        obstacles_.push_back(ob);
+    // 生成动态障碍物的预测轨迹
+    for(int i = 0; i < N_; i++){
+        Eigen::VectorXd pred_ob = dynamic_ob_initial;
+        // 根据速度和时间步更新X坐标
+        pred_ob(0) = dynamic_ob_initial(0) + obs_vx * (i * replan_period_);
+        obstacles_.push_back(pred_ob);
     }
-    ob << 10.0,-0.5,1.0,1.0,0.0;
-    obstacles_.push_back(ob);
-    for(int i = 1; i< size_dynamic*N_; i++){
-    double replan_period_ = 0.1;
-        ob(0) = ob(0) + 2.0*replan_period_; // vx = 5.0
-        obstacles_.push_back(ob);
-    }
-
-    /*
-    ob << 15.0,-6.5,1.0,1.0,0.0;
-    obstacles_.push_back(ob);
-    for(int i = 1; i< size_dynamic*N_; i++){
-    double replan_period_ = 0.1;
-        ob(0) = ob(0) + 0.2*replan_period_; // vx = 5.0
-        ob(1) = ob(1) + 1.5*replan_period_; // vx = 5.0
-        obstacles_.push_back(ob);
-    }
-    */
 }
 
 // 对应Python: __global_path_cb函数 (lines 83-90)
 // 接受参考线轨迹
 void LocalPlanner::globalPathCallback() {
     std::lock_guard<std::mutex> lock(global_path_mutex_);
-    int size = 100;// 100 个初始点
-    if (size > 0) {
-        global_path_ = Eigen::MatrixXd::Zero(size, 3);
-        for (int i = 0; i < size; ++i) {
-            global_path_(i, 0) = i*0.5; //msg->poses[i].pose.position.x;
-            global_path_(i, 1) = 0.0; //msg->poses[i].pose.position.y;
-            global_path_(i, 2) = 0.0; // 如果需要角度信息可以从四元数提取
+
+    std::vector<Eigen::Vector4d> path_points;
+    const double target_v = 8.0; // m/s
+    const double R = 10.0;       // 转弯半径 (m)
+    const double final_x = -20.0;
+    const double final_y = 20.0;
+
+    // 路径点分布
+    const int num_points_seg1 = 20; // 第一段直线
+    const int num_points_seg2 = 50; // 第二段圆弧
+    const int num_points_seg3 = 20; // 第三段直线
+
+    // --- 段 1: 沿Y轴直行 ---
+    // 从 (0,0) 到 (0, 10)
+    double start_y_seg1 = 0.0;
+    double end_y_seg1 = final_y - R;
+    for (int i = 0; i <= num_points_seg1; ++i) {
+        double y = start_y_seg1 + ((double)i / num_points_seg1) * (end_y_seg1 - start_y_seg1);
+        path_points.push_back(Eigen::Vector4d(0.0, y, M_PI / 2.0, target_v));
+    }
+
+    // --- 段 2: 90度圆弧左转 ---
+    // 从 (0, 10) 到 (-10, 20)
+    // 圆心为 (-10, 10)
+    Eigen::Vector2d center(-R, final_y - R);
+    for (int i = 1; i <= num_points_seg2; ++i) {
+        double phi = (double)i / num_points_seg2 * (M_PI / 2.0); // 角度从0到π/2
+        double x = center(0) + R * std::cos(phi);
+        double y = center(1) + R * std::sin(phi);
+        double theta = M_PI / 2.0 + phi;
+        path_points.push_back(Eigen::Vector4d(x, y, normalizeAngle(theta), target_v));
+    }
+
+    // --- 段 3: 沿X轴负方向直行 ---
+    // 从 (-10, 20) 到 (-20, 20)
+    double start_x_seg3 = -R;
+    double end_x_seg3 = final_x;
+    for (int i = 1; i <= num_points_seg3; ++i) {
+        double x = start_x_seg3 + ((double)i / num_points_seg3) * (end_x_seg3 - start_x_seg3);
+        path_points.push_back(Eigen::Vector4d(x, final_y, M_PI, target_v));
+    }
+
+    // 将路径点复制到成员变量
+    if (!path_points.empty()) {
+        global_path_ = Eigen::MatrixXd(path_points.size(), 4);
+        for(size_t i = 0; i < path_points.size(); ++i) {
+            global_path_.row(i) = path_points[i];
         }
         global_path_received_ = true;
     }
@@ -362,10 +350,15 @@ bool LocalPlanner::chooseGoalState() {
 
 // 对应Python中的系统模型函数f (在MPC_ellip中定义)
 casadi::MX LocalPlanner::systemModel(const casadi::MX& x, const casadi::MX& u) {
-    return casadi::MX::vertcat({
-        u(0) * casadi::MX::cos(x(2)),  // ẋ = v*cos(θ)
-        u(0) * casadi::MX::sin(x(2)),  // ẏ = v*sin(θ)
-        u(1)                           // θ̇ = ω
+    casadi::MX v = x(3);
+    casadi::MX a = u(0);
+    casadi::MX delta = u(1);
+
+    return casadi::MX::vertcat(std::vector<casadi::MX>{
+        v * casadi::MX::cos(x(2)),      // ẋ = v*cos(θ)
+        v * casadi::MX::sin(x(2)),      // ẏ = v*sin(θ)
+        v / L_ * casadi::MX::tan(delta),// θ̇ = v/L*tan(δ)
+        a                               // v̇ = a
     });
 }
 
@@ -507,26 +500,29 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
     // 对应Python: 参数设置 (lines 182-188)
     double T = 0.1;        // 时间步长
     double gamma_k = 0.3;  // 障碍物约束松弛因子
-    double v_max = 10;    // 最大线速度
+    double v_max = 10.0;    // 最大线速度
     double v_min = 0.0;    // 最小线速度  
-    double omega_max = 1.2; // 最大角速度
+    double a_max = 2.0;    // 最大加速度
+    double a_min = -3.0;   // 最大减速度
+    double delta_max = M_PI / 4; // 最大前轮转角
     
     //ROS_INFO("MPC parameters: T=%.3f, gamma_k=%.3f, v_max=%.3f, v_min=%.3f, omega_max=%.3f", 
     //         T, gamma_k, v_max, v_min, omega_max);
     
     try {
         // 对应Python: opt_x0 = opti.parameter(3)
-        auto opt_x0 = opti.parameter(3, 1);
+        auto opt_x0 = opti.parameter(4, 1);
         //ROS_INFO("Created initial state parameter opt_x0");
         
         // 对应Python: opt_states = opti.variable(self.N + 1, 3)
-        auto opt_states = opti.variable(N_ + 1, 3);
+        auto opt_states = opti.variable(N_ + 1, 4);
         auto opt_controls = opti.variable(N_, 2);
         //ROS_INFO("Created state variables opt_states(%d x 3) and control variables opt_controls(%d x 2)", N_+1, N_);
         
         // 对应Python: v = opt_controls[:, 0], omega = opt_controls[:, 1]
-        auto v = opt_controls(casadi::Slice(), 0);
-        auto omega = opt_controls(casadi::Slice(), 1);
+        auto a = opt_controls(casadi::Slice(), 0);
+        auto delta = opt_controls(casadi::Slice(), 1);
+        auto v = opt_states(casadi::Slice(0, N_), 3);
         //ROS_INFO("Extracted velocity and angular velocity control variables");
         
         // 对应Python: opti.subject_to(opt_states[0, :] == opt_x0.T) (line 291)
@@ -543,18 +539,14 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
             //ROS_INFO("Distance to goal: %.3f, near goal: %s", dist_to_goal, near_goal ? "yes" : "no");
         }
         
-        if (!near_goal) {
-            opti.subject_to(v >= v_min);
-            opti.subject_to(v <= v_max);
-            //ROS_INFO("Added forward velocity constraint: [%.3f, %.3f]", v_min, v_max);
-        } else {
-            opti.subject_to(v >= -v_min);
-            opti.subject_to(v <= v_max); 
-            //ROS_INFO("Added bidirectional velocity constraint: [%.3f, %.3f]", -v_min, v_max);
-        }
-        opti.subject_to(omega >= -omega_max);
-        opti.subject_to(omega <= omega_max);
-        //ROS_INFO("Added angular velocity constraint: [%.3f, %.3f]", -omega_max, omega_max);
+        // 状态和控制约束
+        opti.subject_to(v >= v_min);
+        opti.subject_to(v <= v_max);
+        opti.subject_to(a >= a_min);
+        opti.subject_to(a <= a_max);
+        opti.subject_to(delta >= -delta_max);
+        opti.subject_to(delta <= delta_max);
+        //ROS_INFO("Added state and control constraints");
         
         // 对应Python: 系统模型约束 (lines 299-301)
         //ROS_INFO("Starting to add system model constraints");
@@ -570,164 +562,172 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         }
         //ROS_INFO("Completed all %d system model constraints", N_);
         casadi::MX obj = 0;
-        // 对应Python: 障碍物约束 (lines 303-309) - 修复索引问题
-        int num_obs = 0;
-        if (!obstacles_.empty()) {
-            //ROS_INFO("Starting to process obstacle constraints");
-            //ROS_INFO("obstacles_.size() = %zu", obstacles_.size());
-            double slack_weight = 1000.0;  // 较大的权重以确保尽量满足约束
-    
-            // Fix: Calculate based on actual obstacle data structure
-            // Check if obstacle data is sufficient for N_ step prediction
-            if (obstacles_.size() >= N_) {
-                num_obs = obstacles_.size() / N_; // Simplified processing, assume only one obstacle sequence
-                //ROS_INFO("Detected sufficient obstacle data, preparing to add constraints");
-                
-                for (int j = 0; j < num_obs; ++j) {
-                    // Fix index problem: use safer index calculation
-                    int base_idx = j * N_;
-                    if (base_idx < static_cast<int>(obstacles_.size())) {
-                        //ROS_INFO("Checking obstacle sequence %d, base index: %d", j, base_idx);
-                        
-                        if (!exceedOb(obstacles_[base_idx])) {
-                            //ROS_INFO("Obstacle %d not out of range, adding ellipse constraints", j);
-                             // 为这个障碍物序列创建松弛变量
-                            auto slack_vars = opti.variable(N_ - 1);
-                            
-                            // 确保松弛变量非负
-                            opti.subject_to(slack_vars >= 0);
-                            
-                            // 累积松弛变量的惩罚项
-                            casadi::MX slack_penalty = 0;
-                            for (int i = 0; i < N_ - 1; ++i) {
-                                // Fix: Use N_ instead of hardcoded 25
-                                int idx1 = base_idx + i;
-                                int idx2 = base_idx + i + 1;
-                                
-                                // Fix: Ensure indices are within valid range
-                                if (idx1 < static_cast<int>(obstacles_.size()) && 
-                                    idx2 < static_cast<int>(obstacles_.size())) {
-                                    
-                                    if (i < 3) { // Only print first few
-                                        //ROS_INFO("Adding obstacle constraint for step %d, idx1=%d, idx2=%d", i, idx1, idx2);
+
+        // obstacles_.clear();
+
+        if (!use_vo_cbf_) {
+            // ------------------ 原始椭圆约束 (BEGIN) ------------------
+            int num_obs = 0;
+            if (!obstacles_.empty()) {
+                double slack_weight = 1000.0;
+                if (obstacles_.size() >= static_cast<size_t>(N_)) {
+                    num_obs = obstacles_.size() / N_;
+                    for (int j = 0; j < num_obs; ++j) {
+                        int base_idx = j * N_;
+                        if (base_idx < static_cast<int>(obstacles_.size())) {
+                            if (!exceedOb(obstacles_[base_idx])) {
+                                auto slack_vars = opti.variable(N_ - 1);
+                                opti.subject_to(slack_vars >= 0);
+                                casadi::MX slack_penalty = 0;
+                                for (int i = 0; i < N_ - 1; ++i) {
+                                    int idx1 = base_idx + i;
+                                    int idx2 = base_idx + i + 1;
+                                    if (idx1 < static_cast<int>(obstacles_.size()) && 
+                                        idx2 < static_cast<int>(obstacles_.size())) {
+                                        auto h_curr = ellipseConstraint(
+                                            opt_states(i, casadi::Slice(0, 2)).T(), 
+                                            obstacles_[idx1]
+                                        );
+                                        auto h_next = ellipseConstraint(
+                                            opt_states(i + 1, casadi::Slice(0, 2)).T(),
+                                            obstacles_[idx2]
+                                        );
+                                        opti.subject_to(h_next + slack_vars(i) >= (1 - gamma_k) * h_curr);
+                                        slack_penalty = slack_penalty + slack_vars(i) * slack_vars(i);
+                                    } else {
+                                        break;
                                     }
-                                    
-                                    auto h_curr = ellipseConstraint(
-                                        opt_states(i, casadi::Slice(0, 2)).T(), 
-                                        obstacles_[idx1]
-                                    );
-                                    auto h_next = ellipseConstraint(
-                                        opt_states(i + 1, casadi::Slice(0, 2)).T(),
-                                        obstacles_[idx2]
-                                    );
-                                    //opti.subject_to(h_next >= (1 - gamma_k) * h_curr);
-                                     // 软约束：允许违反约束，但添加松弛变量
-                                    opti.subject_to(h_next + slack_vars(i) >= (1 - gamma_k) * h_curr);
-                                    
-                                    // 累加松弛变量的惩罚
-                                    slack_penalty = slack_penalty + slack_vars(i) * slack_vars(i);  // 二次惩罚
-                                            
-                                } else {
-                                    //ROS_WARN("Index out of bounds: idx1=%d, idx2=%d, obstacles_.size()=%zu", 
-                                    //         idx1, idx2, obstacles_.size());
-                                    break; // Stop adding more constraints
                                 }
+                                obj = obj + slack_weight * slack_penalty;
                             }
-                             // 将松弛变量惩罚添加到目标函数
-                            obj = obj + slack_weight * slack_penalty;
-                        } else {
-                            //ROS_INFO("Obstacle %d out of range, skipping constraints", j);
                         }
-                    } else {
-                        //ROS_WARN("Base index out of bounds: base_idx=%d, obstacles_.size()=%zu", 
-                        //         base_idx, obstacles_.size());
                     }
                 }
-            } else {
-                //ROS_WARN("Insufficient obstacle data: obstacles_.size()=%zu < N_=%d, skipping obstacle constraints", 
-                //         obstacles_.size(), N_);
             }
+            // ------------------ 原始椭圆约束 (END) ------------------
         } else {
-            //ROS_INFO("No obstacle data, skipping obstacle constraints");
+            // ------------------ CBF/VO 约束 (BEGIN) ------------------
+            
+            double k_cbf = 0.5;      // CBF 增益
+            double k_vo = 1.0;       // VO 增益
+            // double w_slack = 100.0; // VO 松弛变量权重 - 改为可调参数 w_vo_slack_
+            double ego_radius = 0.5; // 自车半径
+
+            int num_obs_sequences = obstacles_.empty() ? 0 : obstacles_.size() / N_;
+
+            for (int j = 0; j < num_obs_sequences; ++j) {
+                casadi::MX slack_vo;
+                if (use_vo_constraint_) {
+                    slack_vo = opti.variable(N_);
+                    opti.subject_to(slack_vo >= 0);
+                    obj += w_vo_slack_ * casadi::MX::sumsqr(slack_vo);
+                }
+
+                // 通过比较连续两个时间步的位置来动态推断障碍物速度
+                Eigen::VectorXd obs_t0 = obstacles_[j * N_];
+                Eigen::VectorXd obs_t1 = obstacles_[j * N_ + 1];
+                double obs_vx = (obs_t1(0) - obs_t0(0)) / replan_period_;
+                double obs_vy = (obs_t1(1) - obs_t0(1)) / replan_period_;
+                casadi::MX obs_vel = casadi::MX::vertcat({obs_vx, obs_vy});
+
+                for (int i = 0; i < N_ -1; ++i) {
+                    // -- 状态提取 --
+                    auto ego_state_i = opt_states(i, casadi::Slice()).T();
+                    auto ego_state_i1 = opt_states(i + 1, casadi::Slice()).T();
+
+                    auto ego_pos_i = ego_state_i(casadi::Slice(0,2));
+                    auto ego_pos_i1 = ego_state_i1(casadi::Slice(0,2));
+                    auto ego_vel_i = casadi::MX::vertcat({ego_state_i(3) * casadi::MX::cos(ego_state_i(2)), ego_state_i(3) * casadi::MX::sin(ego_state_i(2))});
+                    auto ego_vel_i1 = casadi::MX::vertcat({ego_state_i1(3) * casadi::MX::cos(ego_state_i1(2)), ego_state_i1(3) * casadi::MX::sin(ego_state_i1(2))});
+
+                    auto obs_pos_i = casadi::MX::vertcat({obstacles_[j*N_ + i](0), obstacles_[j*N_ + i](1)});
+                    auto obs_pos_i1 = casadi::MX::vertcat({obstacles_[j*N_ + i + 1](0), obstacles_[j*N_ + i + 1](1)});
+                    double obs_radius = obstacles_[j*N_ + i](2); // 简化为圆形
+
+                    auto p_rel_i = ego_pos_i - obs_pos_i;
+                    auto v_rel_i = ego_vel_i - obs_vel;
+                    auto p_rel_i1 = ego_pos_i1 - obs_pos_i1;
+                    auto v_rel_i1 = ego_vel_i1 - obs_vel;
+                    double R_sum_sq = std::pow(ego_radius + obs_radius, 2);
+
+                    // -- CBF 硬约束 (基于刹车距离) --
+                    double u_max = -a_min; // 最大减速度值
+                    double safe_dist_cbf = 1.0; // 最小安全缓冲距离
+
+                    // h at time i
+                    auto dist_i = casadi::MX::sqrt(casadi::MX::sumsqr(p_rel_i));
+                    auto n_rel_i = p_rel_i / dist_i;
+                    auto radial_vel_i = casadi::MX::mtimes(n_rel_i.T(), v_rel_i);
+                    auto h_cbf_i = dist_i - safe_dist_cbf - (radial_vel_i * radial_vel_i) / (2 * u_max);
+
+                    // h at time i+1
+                    auto dist_i1 = casadi::MX::sqrt(casadi::MX::sumsqr(p_rel_i1));
+                    auto n_rel_i1 = p_rel_i1 / dist_i1;
+                    auto radial_vel_i1 = casadi::MX::mtimes(n_rel_i1.T(), v_rel_i1);
+                    auto h_cbf_i1 = dist_i1 - safe_dist_cbf - (radial_vel_i1 * radial_vel_i1) / (2 * u_max);
+
+                    opti.subject_to(h_cbf_i1 >= (1 - k_cbf * T) * h_cbf_i);
+
+                    // -- VO 软约束 (可选) --
+                    if (use_vo_constraint_) {
+                        // h_vo at time i
+                        auto p_rel_dot_v_rel_i = casadi::MX::mtimes(p_rel_i.T(), v_rel_i);
+                        auto norm_v_rel_i = casadi::MX::sqrt(casadi::MX::sumsqr(v_rel_i));
+                        auto sqrt_term_i = casadi::MX::sqrt(casadi::MX::sumsqr(p_rel_i) - R_sum_sq);
+                        auto h_vo_i = p_rel_dot_v_rel_i + norm_v_rel_i * sqrt_term_i;
+
+                        // h_vo at time i+1
+                        auto p_rel_dot_v_rel_i1 = casadi::MX::mtimes(p_rel_i1.T(), v_rel_i1);
+                        auto norm_v_rel_i1 = casadi::MX::sqrt(casadi::MX::sumsqr(v_rel_i1));
+                        auto sqrt_term_i1 = casadi::MX::sqrt(casadi::MX::sumsqr(p_rel_i1) - R_sum_sq);
+                        auto h_vo_i1 = p_rel_dot_v_rel_i1 + norm_v_rel_i1 * sqrt_term_i1;
+                        
+                        opti.subject_to(h_vo_i1 >= (1 - k_vo * T) * h_vo_i - slack_vo(i));
+                    }
+                }
+            }
+            // ------------------ CBF/VO 约束 (END) ------------------
         }
         
         // 对应Python: 目标函数 (lines 311-327)
-        //ROS_INFO("Starting to build objective function");
-        //casadi::MX obj = 0;
-        
-        // R矩阵 (控制权重)
-        Eigen::Matrix2d R = Eigen::Vector2d(0.1, 0.02).asDiagonal();
-        //ROS_INFO("R matrix diagonal elements: [%.3f, %.3f]", R(0,0), R(1,1));
-        
+
+        // -- 权重矩阵定义 --
+        Eigen::Matrix4d Q = Eigen::Vector4d(1.0, 1.0, 0.5, 0.2).asDiagonal(); // x, y, theta, v 的状态误差权重
+        Eigen::Matrix2d R = Eigen::Vector2d(0.01, 0.01).asDiagonal(); // a, delta 的控制量大小权重
+        Eigen::Matrix2d R_rate = Eigen::Vector2d(w_a_rate_, w_delta_rate_).asDiagonal(); // a, delta 的控制量变化率权重
+        Eigen::Matrix4d Q_terminal = Eigen::Vector4d(100.0, 100.0, 5.0, 2.0).asDiagonal(); // 终端状态误差权重
+
+        // -- 目标函数构建 --
         for (int i = 0; i < N_; ++i) {
-            // Q矩阵 (状态权重)
-            Eigen::Vector3d q_diag(1.0 + 0.05*i, 1.0 + 0.05*i, 0.02 + 0.005*i);
-            Eigen::Matrix3d Q = q_diag.asDiagonal();
-            
-            // 状态误差 - 分别处理位置和角度
-            // 位置误差 (x, y)
-            casadi::MX pos_error = casadi::MX::vertcat({
-                opt_states(i, 0) - goal_state_(i, 0),
-                opt_states(i, 1) - goal_state_(i, 1)
-            });
-            
-            // 角度误差 - 使用sin和cos来处理角度差以避免跳变
-            casadi::MX angle_current = opt_states(i, 2);
-            casadi::MX angle_goal = casadi::MX(goal_state_(i, 2));
-            
-            // 使用角度差的sin和cos来创建连续的角度误差
-            casadi::MX angle_error_sin = casadi::MX::sin(angle_current - angle_goal);
-            casadi::MX angle_error_cos = casadi::MX::cos(angle_current - angle_goal) - 1;
-            
-            // 位置部分的二次项
-            casadi::MX pos_cost = pos_error(0) * pos_error(0) * Q(0,0) + 
-                                  pos_error(1) * pos_error(1) * Q(1,1);
-            
-            // 角度部分的二次项 - 使用1-cos(θ)形式，它在θ=0附近是连续且平滑的
-            casadi::MX angle_cost = Q(2,2) * (angle_error_sin * angle_error_sin + 
-                                              angle_error_cos * angle_error_cos);
-            
-            if (i < N_ - 1) {
-                // 控制误差  
-                casadi::MX control_error = opt_controls(i, casadi::Slice());
-                obj += 0.1 * (pos_cost + angle_cost) + quadratic(control_error, R);
-            } else {
-                obj += 0.1 * (pos_cost + angle_cost);
-            }
-            
-            if (i < 3) { // Only print first few
-                //ROS_INFO("Added objective term for step %d, goal state: [%.3f, %.3f, %.3f]", 
-                         //i, goal_state_(i, 0), goal_state_(i, 1), goal_state_(i, 2));
+            // 1. 状态跟踪误差 (State Tracking Cost)
+            Eigen::VectorXd goal_i_eigen = goal_state_.row(i);
+            std::vector<double> goal_i_std(goal_i_eigen.data(), goal_i_eigen.data() + goal_i_eigen.size());
+            auto state_error = opt_states(i, casadi::Slice()).T() - casadi::DM(goal_i_std);
+            // 对角度误差进行特殊处理，避免跳变问题
+            casadi::MX angle_error_term = casadi::MX::sin(opt_states(i, 2) - goal_state_(i, 2));
+            // 将原始角度误差替换为sin形式的误差
+            state_error(2) = angle_error_term;
+            obj += w_track_ * quadratic(state_error.T(), Q);
+
+            // 2. 控制量大小惩罚 (Control Magnitude Cost)
+            auto u_i = opt_controls(i, casadi::Slice()).T();
+            obj += quadratic(u_i.T(), R);
+
+            // 3. 控制量变化率惩罚 (Control Rate Cost)
+            if (i > 0) {
+                auto u_prev = opt_controls(i-1, casadi::Slice()).T();
+                auto u_rate_error = u_i - u_prev;
+                obj += quadratic(u_rate_error.T(), R_rate);
             }
         }
-        
-        // 终端约束权重 - 修复角度误差计算
-        Eigen::Matrix3d Q_terminal = Eigen::Vector3d(5.0, 5.0, 0.1).asDiagonal();
-        
-        // 终端位置误差
-        casadi::MX terminal_pos_error = casadi::MX::vertcat({
-            opt_states(N_-1, 0) - goal_state_(N_-1, 0),
-            opt_states(N_-1, 1) - goal_state_(N_-1, 1)
-        });
-        
-        // 终端角度误差
-        casadi::MX terminal_angle_current = opt_states(N_-1, 2);
-        casadi::MX terminal_angle_goal = casadi::MX(goal_state_(N_-1, 2));
-        
-        casadi::MX terminal_angle_error_sin = casadi::MX::sin(terminal_angle_current - terminal_angle_goal);
-        casadi::MX terminal_angle_error_cos = casadi::MX::cos(terminal_angle_current - terminal_angle_goal) - 1;
-        
-        // 终端位置成本
-        casadi::MX terminal_pos_cost = terminal_pos_error(0) * terminal_pos_error(0) * Q_terminal(0,0) + 
-                                       terminal_pos_error(1) * terminal_pos_error(1) * Q_terminal(1,1);
-        
-        // 终端角度成本
-        casadi::MX terminal_angle_cost = Q_terminal(2,2) * (terminal_angle_error_sin * terminal_angle_error_sin + 
-                                                             terminal_angle_error_cos * terminal_angle_error_cos);
-        
-        obj += terminal_pos_cost + terminal_angle_cost;
-        //ROS_INFO("Added terminal cost term, terminal goal: [%.3f, %.3f, %.3f]", 
-                // goal_state_(N_-1, 0), goal_state_(N_-1, 1), goal_state_(N_-1, 2));
+
+        // 4. 终端状态误差惩罚 (Terminal State Cost)
+        Eigen::VectorXd terminal_goal_eigen = goal_state_.row(N_-1);
+        std::vector<double> terminal_goal_std(terminal_goal_eigen.data(), terminal_goal_eigen.data() + terminal_goal_eigen.size());
+        auto terminal_state_error = opt_states(N_, casadi::Slice()).T() - casadi::DM(terminal_goal_std);
+        casadi::MX terminal_angle_error_term = casadi::MX::sin(opt_states(N_, 2) - goal_state_(N_-1, 2));
+        terminal_state_error(2) = terminal_angle_error_term;
+        obj += w_track_ * quadratic(terminal_state_error.T(), Q_terminal);
         
         opti.minimize(obj);
         //ROS_INFO("Set optimization objective function");
@@ -743,7 +743,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         opti.solver("ipopt", opts_setting);
         //ROS_INFO("Configured IPOPT solver");
         
-        opti.set_value(opt_x0, casadi::DM({curr_state_(0), curr_state_(1), curr_state_(2)}));
+        opti.set_value(opt_x0, casadi::DM({curr_state_(0), curr_state_(1), curr_state_(2), curr_state_(3)}));
         //ROS_INFO("Set initial state parameter: [%.3f, %.3f, %.3f]", curr_state_(0), curr_state_(1), curr_state_(2));
         
         Eigen::MatrixXd u_res, state_res;
@@ -760,7 +760,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         
         // 转换为Eigen格式
         u_res = Eigen::MatrixXd(N_, 2);
-        state_res = Eigen::MatrixXd(N_ + 1, 3);
+        state_res = Eigen::MatrixXd(N_ + 1, 4);
         
         for (int i = 0; i < N_; ++i) {
             u_res(i, 0) = static_cast<double>(u_sol(i, 0));
@@ -771,11 +771,12 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
             state_res(i, 0) = static_cast<double>(state_sol(i, 0));
             state_res(i, 1) = static_cast<double>(state_sol(i, 1));
             state_res(i, 2) = static_cast<double>(state_sol(i, 2));
+            state_res(i, 3) = static_cast<double>(state_sol(i, 3));
         }
         
         std::cout <<"Successfully converted solution to Eigen format" << std::endl;
         std::cout << "First control input: " << u_res(0, 0) << " " << u_res(0, 1) << std::endl;
-        std::cout <<"First state:" << state_res(0, 0) << " " <<  state_res(0, 1) << " "<<  state_res(0, 2) << std::endl;
+        std::cout <<"First state:" << state_res(0, 0) << " " <<  state_res(0, 1) << " "<<  state_res(0, 2) << " " << state_res(0,3) << std::endl;
         
         last_input_ = u_res;
         last_state_ = state_res;

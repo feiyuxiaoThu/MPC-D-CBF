@@ -14,9 +14,10 @@ private:
     double replan_period_;
     int N_;  // 预测步数，对应Python: self.N = 25
     double z_; // 高度，对应Python: self.z = 0
+    double L_; // 车辆轴距
     
     // 对应Python: self.curr_state, self.global_path, self.ob
-    Eigen::Vector3d curr_state_;
+    Eigen::Vector4d curr_state_;
     Eigen::MatrixXd global_path_;
     std::vector<Eigen::VectorXd> obstacles_; // 对应Python: self.ob = []
     Eigen::MatrixXd goal_state_; // 对应Python: self.goal_state
@@ -33,6 +34,12 @@ private:
     // 状态标志
     bool curr_state_received_ ;
     bool global_path_received_;
+    bool use_vo_cbf_; // CBF/VO flag
+    bool use_vo_constraint_; // VO constraint flag
+    double w_vo_slack_;      // VO slack variable weight
+    double w_track_;         // Tracking error weight
+    double w_a_rate_;        // Jerk penalty weight
+    double w_delta_rate_;    // Steering rate penalty weight
     
 
 public:
@@ -44,7 +51,7 @@ public:
 
     void replanCallback();
 
-    void saveDataForVisualization() const;
+    void saveDataForVisualization2D() const;
     
 private:
     // 对应Python的回调函数

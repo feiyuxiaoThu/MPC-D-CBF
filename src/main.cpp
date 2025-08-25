@@ -7,7 +7,7 @@ int main() {
     planner.replanCallback();
     
     std::cout << "Saving visualization data..." << std::endl;
-    planner.saveDataForVisualization();
+    planner.saveDataForVisualization2D();
     
     return 0;
 }
