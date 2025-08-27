@@ -11,8 +11,9 @@
 class LocalPlanner {
 private:
     // 对应Python: self.replan_period等参数
-    double replan_period_;
+    // double replan_period_;
     int N_;  // 预测步数，对应Python: self.N = 25
+    double T_; // MPC内部预测时间步长
     double z_; // 高度，对应Python: self.z = 0
     double L_; // 车辆轴距
     
@@ -40,6 +41,8 @@ private:
     double w_track_;         // Tracking error weight
     double w_a_rate_;        // Jerk penalty weight
     double w_delta_rate_;    // Steering rate penalty weight
+    double half_road_width_; // Half of the road width for corridor constraint
+    double k_road_cbf_;      // CBF gain for road boundaries
     
 
 public:
@@ -58,6 +61,8 @@ private:
     void currPoseCallback();
     void obsCallback();
     void globalPathCallback();
+
+    void saveCorridorForVisualization() const;
     
     // 对应Python的核心算法
     bool chooseGoalState();

@@ -87,8 +87,9 @@ LocalPlanner::LocalPlanner() {
     
     // 对应Python: self.N = 25, self.z = 0
     N_ = 80; // MPC预测步数
+    T_ = 0.1; // MPC内部预测时间步长
     z_ = 0.0;
-    replan_period_ = 0.1;
+    // replan_period_ = 0.05;
     L_ = 2.5; // 车辆轴距 (m)
     
     // 对应Python: self.goal_state = np.zeros([self.N, 3])
@@ -99,12 +100,14 @@ LocalPlanner::LocalPlanner() {
     mpc_success_ = false;
     curr_state_received_ = true;
     global_path_received_ = true;
-    use_vo_cbf_ = true; // 激活 CBF/VO 约束
+    use_vo_cbf_ = false; // 激活 CBF/VO 约束
     use_vo_constraint_ = false; // 默认激活VO约束
     w_vo_slack_ = 1.0;      // VO松弛变量的默认权重
     w_track_ = 5000.0;           // 轨迹跟踪误差的默认权重
     w_a_rate_ = 2.0;          // 加速度变化率(jerk)的默认权重
     w_delta_rate_ = 3.0;      // 转角变化率的默认权重
+    half_road_width_ = 4.5;   // 道路宽度的一半 (米), 用于约束走廊
+    k_road_cbf_ = 1.0;        // 道路边界CBF约束的增益
 
     currPoseCallback(); // curr_state_
     obsCallback();
@@ -184,6 +187,8 @@ void LocalPlanner::replanCallback() {
     for (int i = 0; i < N_; ++i) {
         goal_state_(i, 2) = normalizeAngle(goal_state_(i, 2));
     }
+
+    saveCorridorForVisualization();
     
     // 对应Python: states_sol, input_sol = self.MPC_ellip()
     auto [states_sol, input_sol] = mpcEllip();
@@ -220,7 +225,7 @@ void LocalPlanner::currPoseCallback() {
     bool use_ego_cor = true;
     if (use_ego_cor) {
         // 起始状态: 位于(0,0), 速度为3m/s, 方向朝上(π/2)
-        curr_state_ << 0.0, 0.0, M_PI / 2.0, 8.0;
+        curr_state_ << 0.0, 0.0, M_PI / 2.0, 5.0;
         curr_state_received_ = true;
     }
 }
@@ -232,7 +237,7 @@ void LocalPlanner::obsCallback() {
 
     // --- 障碍物 1: 位于初始路径上的静态障碍物 ---
     Eigen::VectorXd static_ob(5);
-    static_ob << -10.0, 45.0, 2.0, 3.0, 0.0; // 位置(0, 8), 半径 1.0m
+    static_ob << -30.0, 52.0, 2.0, 1.5, 0.0; // 位置(0, 8), 半径 1.0m
     for(int i = 0; i < N_; i++){
         obstacles_.push_back(static_ob);
     }
@@ -247,7 +252,22 @@ void LocalPlanner::obsCallback() {
     for(int i = 0; i < N_; i++){
         Eigen::VectorXd pred_ob = dynamic_ob_initial;
         // 根据速度和时间步更新X坐标
-        pred_ob(0) = dynamic_ob_initial(0) + obs_vx * (i * replan_period_);
+        pred_ob(0) = dynamic_ob_initial(0) + obs_vx * (i * T_);
+        obstacles_.push_back(pred_ob);
+    }
+
+    // --- 障碍物 3: 从上向下穿行的动态障碍物 ---
+    dynamic_ob_initial << 10.0, 50.0, 1.5, 0.8, 0.0; // 初始位置(-10, 12), 尺寸(1.5, 0.8), 方向朝右
+    
+    obs_vx = -3.5; // X方向速度
+    double obs_vy = -3.5; // X方向速度
+
+    // 生成动态障碍物的预测轨迹
+    for(int i = 0; i < N_; i++){
+        Eigen::VectorXd pred_ob = dynamic_ob_initial;
+        // 根据速度和时间步更新X坐标
+        pred_ob(0) = dynamic_ob_initial(0) + obs_vx * (i * T_);
+        pred_ob(1) = dynamic_ob_initial(1) + obs_vy * (i * T_);
         obstacles_.push_back(pred_ob);
     }
 }
@@ -498,7 +518,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
     //ROS_INFO("Created casadi optimizer");
     
     // 对应Python: 参数设置 (lines 182-188)
-    double T = 0.1;        // 时间步长
+    // double T = replan_period_;        // 时间步长 (REMOVED - Using T_ member variable now)
     double gamma_k = 0.3;  // 障碍物约束松弛因子
     double v_max = 10.0;    // 最大线速度
     double v_min = 0.0;    // 最小线速度  
@@ -553,7 +573,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         for (int i = 0; i < N_; ++i) {
             auto x_curr = opt_states(i, casadi::Slice());
             auto u_curr = opt_controls(i, casadi::Slice());
-            auto x_next = x_curr + T * systemModel(x_curr.T(), u_curr.T()).T();
+            auto x_next = x_curr + T_ * systemModel(x_curr.T(), u_curr.T()).T();
             opti.subject_to(opt_states(i + 1, casadi::Slice()) == x_next);
             
             if (i < 3) { // Only print first few to avoid log spam
@@ -562,6 +582,8 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         }
         //ROS_INFO("Completed all %d system model constraints", N_);
         casadi::MX obj = 0;
+
+        // Road boundary constraints are now handled within the main objective function loop below.
 
         // obstacles_.clear();
 
@@ -608,7 +630,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         } else {
             // ------------------ CBF/VO 约束 (BEGIN) ------------------
             
-            double k_cbf = 0.5;      // CBF 增益
+            double k_cbf = 50.0;      // CBF 增益
             double k_vo = 1.0;       // VO 增益
             // double w_slack = 100.0; // VO 松弛变量权重 - 改为可调参数 w_vo_slack_
             double ego_radius = 0.5; // 自车半径
@@ -626,8 +648,8 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
                 // 通过比较连续两个时间步的位置来动态推断障碍物速度
                 Eigen::VectorXd obs_t0 = obstacles_[j * N_];
                 Eigen::VectorXd obs_t1 = obstacles_[j * N_ + 1];
-                double obs_vx = (obs_t1(0) - obs_t0(0)) / replan_period_;
-                double obs_vy = (obs_t1(1) - obs_t0(1)) / replan_period_;
+                double obs_vx = (obs_t1(0) - obs_t0(0)) / T_;
+                double obs_vy = (obs_t1(1) - obs_t0(1)) / T_;
                 casadi::MX obs_vel = casadi::MX::vertcat({obs_vx, obs_vy});
 
                 for (int i = 0; i < N_ -1; ++i) {
@@ -666,7 +688,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
                     auto radial_vel_i1 = casadi::MX::mtimes(n_rel_i1.T(), v_rel_i1);
                     auto h_cbf_i1 = dist_i1 - safe_dist_cbf - (radial_vel_i1 * radial_vel_i1) / (2 * u_max);
 
-                    opti.subject_to(h_cbf_i1 >= (1 - k_cbf * T) * h_cbf_i);
+                    opti.subject_to(h_cbf_i1 >= (1 - k_cbf * T_) * h_cbf_i);
 
                     // -- VO 软约束 (可选) --
                     if (use_vo_constraint_) {
@@ -682,7 +704,7 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
                         auto sqrt_term_i1 = casadi::MX::sqrt(casadi::MX::sumsqr(p_rel_i1) - R_sum_sq);
                         auto h_vo_i1 = p_rel_dot_v_rel_i1 + norm_v_rel_i1 * sqrt_term_i1;
                         
-                        opti.subject_to(h_vo_i1 >= (1 - k_vo * T) * h_vo_i - slack_vo(i));
+                        opti.subject_to(h_vo_i1 >= (1 - k_vo * T_) * h_vo_i - slack_vo(i));
                     }
                 }
             }
@@ -690,30 +712,49 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         }
         
         // 对应Python: 目标函数 (lines 311-327)
+        // This revised formulation decouples lateral and longitudinal control
+        // to fix the logical issue of tying a spatial constraint to a timed reference point.
 
-        // -- 权重矩阵定义 --
-        Eigen::Matrix4d Q = Eigen::Vector4d(1.0, 1.0, 0.5, 0.2).asDiagonal(); // x, y, theta, v 的状态误差权重
-        Eigen::Matrix2d R = Eigen::Vector2d(0.01, 0.01).asDiagonal(); // a, delta 的控制量大小权重
-        Eigen::Matrix2d R_rate = Eigen::Vector2d(w_a_rate_, w_delta_rate_).asDiagonal(); // a, delta 的控制量变化率权重
-        Eigen::Matrix4d Q_terminal = Eigen::Vector4d(100.0, 100.0, 5.0, 2.0).asDiagonal(); // 终端状态误差权重
+        // --- Weights Definition ---
+        // Running costs
+        Eigen::Matrix2d Q_lat = Eigen::Vector2d(1.0, 0.5).asDiagonal();
+        double Q_v = 0.2; // Weight for velocity tracking error
+        Eigen::Matrix2d R = Eigen::Vector2d(0.01, 0.01).asDiagonal(); // Control magnitude weights
+        Eigen::Matrix2d R_rate = Eigen::Vector2d(w_a_rate_, w_delta_rate_).asDiagonal(); // Control rate weights
+        
+        // Terminal cost weights (penalizing x, y, theta, v errors)
+        Eigen::Matrix4d Q_terminal = Eigen::Vector4d(100.0, 100.0, 50.0, 20.0).asDiagonal();
 
-        // -- 目标函数构建 --
+        // --- Main Loop for Objective Function ---
         for (int i = 0; i < N_; ++i) {
-            // 1. 状态跟踪误差 (State Tracking Cost)
-            Eigen::VectorXd goal_i_eigen = goal_state_.row(i);
-            std::vector<double> goal_i_std(goal_i_eigen.data(), goal_i_eigen.data() + goal_i_eigen.size());
-            auto state_error = opt_states(i, casadi::Slice()).T() - casadi::DM(goal_i_std);
-            // 对角度误差进行特殊处理，避免跳变问题
-            casadi::MX angle_error_term = casadi::MX::sin(opt_states(i, 2) - goal_state_(i, 2));
-            // 将原始角度误差替换为sin形式的误差
-            state_error(2) = angle_error_term;
-            obj += w_track_ * quadratic(state_error.T(), Q);
+            auto ego_state = opt_states(i, casadi::Slice()).T();
+            auto ego_pos = ego_state(casadi::Slice(0, 2));
+            
+            Eigen::VectorXd ref_point_eigen = goal_state_.row(i);
+            auto ref_pos = casadi::DM({ref_point_eigen(0), ref_point_eigen(1)});
+            double ref_theta = ref_point_eigen(2);
+            double ref_v = ref_point_eigen(3);
 
-            // 2. 控制量大小惩罚 (Control Magnitude Cost)
+            // 1. Lateral Error Calculation (for running cost)
+            auto normal_vec = casadi::DM({-std::sin(ref_theta), std::cos(ref_theta)});
+            auto lateral_error_vec = ego_pos - ref_pos;
+            auto lateral_dist = casadi::MX::mtimes(lateral_error_vec.T(), normal_vec);
+
+            // 2. Add Objective Function Terms for this step
+            // a. Cost on lateral error and heading error
+            casadi::MX angle_error_term = casadi::MX::sin(ego_state(2) - ref_theta);
+            casadi::MX lat_error_for_cost = casadi::MX::vertcat({lateral_dist, angle_error_term});
+            obj += w_track_ * quadratic(lat_error_for_cost.T(), Q_lat);
+
+            // b. Cost on velocity tracking error
+            casadi::MX v_error = ego_state(3) - ref_v;
+            obj += w_track_ * Q_v * v_error * v_error;
+
+            // c. Cost on control magnitude
             auto u_i = opt_controls(i, casadi::Slice()).T();
             obj += quadratic(u_i.T(), R);
 
-            // 3. 控制量变化率惩罚 (Control Rate Cost)
+            // d. Cost on control rate change
             if (i > 0) {
                 auto u_prev = opt_controls(i-1, casadi::Slice()).T();
                 auto u_rate_error = u_i - u_prev;
@@ -721,13 +762,50 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
             }
         }
 
-        // 4. 终端状态误差惩罚 (Terminal State Cost)
+        // --- Terminal Cost (Full State Error) ---
+        auto terminal_state = opt_states(N_, casadi::Slice()).T();
         Eigen::VectorXd terminal_goal_eigen = goal_state_.row(N_-1);
         std::vector<double> terminal_goal_std(terminal_goal_eigen.data(), terminal_goal_eigen.data() + terminal_goal_eigen.size());
-        auto terminal_state_error = opt_states(N_, casadi::Slice()).T() - casadi::DM(terminal_goal_std);
-        casadi::MX terminal_angle_error_term = casadi::MX::sin(opt_states(N_, 2) - goal_state_(N_-1, 2));
+        auto terminal_goal_dm = casadi::DM(terminal_goal_std);
+
+        // Calculate terminal state error [x_err, y_err, theta_err, v_err]
+        auto terminal_state_error = terminal_state - terminal_goal_dm;
+
+        // Special handling for angle error to avoid wrapping issues
+        casadi::MX terminal_angle_error_term = casadi::MX::sin(terminal_state(2) - terminal_goal_dm(2));
         terminal_state_error(2) = terminal_angle_error_term;
+        
+        // Add terminal cost to objective
         obj += w_track_ * quadratic(terminal_state_error.T(), Q_terminal);
+
+        // --- CBF Constraint for Road Boundaries ---
+        for (int i = 0; i < N_ - 1; ++i) {
+            // State i
+            auto ego_state_i = opt_states(i, casadi::Slice()).T();
+            auto ego_pos_i = ego_state_i(casadi::Slice(0, 2));
+            Eigen::VectorXd ref_point_i = goal_state_.row(i);
+            auto ref_pos_i = casadi::DM({ref_point_i(0), ref_point_i(1)});
+            double ref_theta_i = ref_point_i(2);
+            auto normal_vec_i = casadi::DM({-std::sin(ref_theta_i), std::cos(ref_theta_i)});
+            auto lateral_dist_i = casadi::MX::mtimes((ego_pos_i - ref_pos_i).T(), normal_vec_i);
+            auto h_L_i = half_road_width_ - lateral_dist_i;
+            auto h_R_i = half_road_width_ + lateral_dist_i;
+
+            // State i+1
+            auto ego_state_i1 = opt_states(i + 1, casadi::Slice()).T();
+            auto ego_pos_i1 = ego_state_i1(casadi::Slice(0, 2));
+            Eigen::VectorXd ref_point_i1 = goal_state_.row(i + 1);
+            auto ref_pos_i1 = casadi::DM({ref_point_i1(0), ref_point_i1(1)});
+            double ref_theta_i1 = ref_point_i1(2);
+            auto normal_vec_i1 = casadi::DM({-std::sin(ref_theta_i1), std::cos(ref_theta_i1)});
+            auto lateral_dist_i1 = casadi::MX::mtimes((ego_pos_i1 - ref_pos_i1).T(), normal_vec_i1);
+            auto h_L_i1 = half_road_width_ - lateral_dist_i1;
+            auto h_R_i1 = half_road_width_ + lateral_dist_i1;
+
+            // Add CBF constraints
+            opti.subject_to(h_L_i1 >= (1 - k_road_cbf_ * T_) * h_L_i);
+            opti.subject_to(h_R_i1 >= (1 - k_road_cbf_ * T_) * h_R_i);
+        }
         
         opti.minimize(obj);
         //ROS_INFO("Set optimization objective function");
@@ -816,6 +894,35 @@ std::pair<Eigen::MatrixXd, Eigen::MatrixXd> LocalPlanner::mpcEllip() {
         //ROS_INFO("=== mpcEllip() ENDED WITH EXCEPTION, returning backup solution ===");
         return std::make_pair(state_res, u_res);
     }
+}
+
+
+void LocalPlanner::saveCorridorForVisualization() const {
+    std::ofstream corridor_file("../plot/2D/corridor_bounds.txt");
+    if (!corridor_file.is_open()) {
+        std::cerr << "Error: Could not open corridor_bounds.txt for writing." << std::endl;
+        return;
+    }
+
+    for (int i = 0; i < N_; ++i) {
+        double ref_x = goal_state_(i, 0);
+        double ref_y = goal_state_(i, 1);
+        double ref_theta = goal_state_(i, 2);
+
+        double normal_x = -std::sin(ref_theta);
+        double normal_y = std::cos(ref_theta);
+
+        double left_x = ref_x + half_road_width_ * normal_x;
+        double left_y = ref_y + half_road_width_ * normal_y;
+        double right_x = ref_x - half_road_width_ * normal_x;
+        double right_y = ref_y - half_road_width_ * normal_y;
+
+        corridor_file << std::fixed << std::setprecision(5)
+                      << left_x << " " << left_y << " "
+                      << right_x << " " << right_y << std::endl;
+    }
+
+    corridor_file.close();
 }
 
 /*
