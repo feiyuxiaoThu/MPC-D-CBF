@@ -84,7 +84,7 @@ def visualize_from_files():
     ax.grid(True)
 
     # 8. 显示图像
-    plt.show()
+    plt.savefig("2D.png")
 
 if __name__ == '__main__':
     visualize_from_files()

@@ -232,7 +232,7 @@ void LocalPlanner::obsCallback() {
 
     // --- 障碍物 1: 位于初始路径上的静态障碍物 ---
     Eigen::VectorXd static_ob(5);
-    static_ob << -12.0, 20.0, 1.0, 1.0, 0.0; // 位置(0, 8), 半径 1.0m
+    static_ob << -10.0, 45.0, 2.0, 3.0, 0.0; // 位置(0, 8), 半径 1.0m
     for(int i = 0; i < N_; i++){
         obstacles_.push_back(static_ob);
     }
@@ -241,7 +241,7 @@ void LocalPlanner::obsCallback() {
     Eigen::VectorXd dynamic_ob_initial(5);
     dynamic_ob_initial << -20.0, 12.0, 1.5, 0.8, 0.0; // 初始位置(-10, 12), 尺寸(1.5, 0.8), 方向朝右
     
-    double obs_vx = 2.0; // X方向速度
+    double obs_vx = 3.0; // X方向速度
 
     // 生成动态障碍物的预测轨迹
     for(int i = 0; i < N_; i++){
@@ -259,13 +259,13 @@ void LocalPlanner::globalPathCallback() {
 
     std::vector<Eigen::Vector4d> path_points;
     const double target_v = 8.0; // m/s
-    const double R = 10.0;       // 转弯半径 (m)
-    const double final_x = -20.0;
-    const double final_y = 20.0;
+    const double R = 40.0;       // 转弯半径 (m)
+    const double final_x = -60.0;
+    const double final_y = 60.0;
 
     // 路径点分布
     const int num_points_seg1 = 20; // 第一段直线
-    const int num_points_seg2 = 50; // 第二段圆弧
+    const int num_points_seg2 = 60; // 第二段圆弧
     const int num_points_seg3 = 20; // 第三段直线
 
     // --- 段 1: 沿Y轴直行 ---
